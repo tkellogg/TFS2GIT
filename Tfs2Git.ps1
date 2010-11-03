@@ -10,7 +10,8 @@ Param
 	[Parameter(Mandatory = $True)]
 	[string]$TFSRepository,
 	[string]$GitRepository = "ConvertedFromTFS",
-	[string]$WorkspaceName = "TFS2GIT"
+	[string]$WorkspaceName = "TFS2GIT",
+	[bool]$CaseSensitive = $True
 )
 
 function GetTemporaryDirectory
@@ -112,9 +113,30 @@ function Convert ([array]$ChangeSets)
 		# We don't want the commit message to be included, so we remove it from the index.
 		# Not from the working directory, because we need it in the commit command.
 		git rm $CommitMessageFileName --cached --force
+		if (!($CaseSensitive)) {
+			FixCaseSensitivity $CommitMessageFileName
+		}
 		
 		git commit -a --file $CommitMessageFileName | Out-Null
 		popd 
+	}
+}
+
+# If directories names have changed case over the course of the TFS lifetime, you will run into HUGE problems
+# with git. The symptoms are that some files appear in the file structure but Git appears to not be aware of them.
+#
+# This function addresses it by looking at the change log and asking Git about each file. If Git doesn't know 
+# about the file it asks Windows (who is insensitive to case) what the file name is and tells Git to rename it.
+function FixCaseSensitivity([string]$fileName) {
+	$commitMessage = Get-Content $fileName | foreach { [regex]::Split($_, "`r`n") } | foreach {
+		$pattern = $TFSRepository.Replace("$","[$]") + "/(.*)"
+		if ($_ -match $pattern) { 
+			if ([string]::IsNullOrEmpty($(git ls-files $matches[1] | Out-String))) {
+				$realName = ls $matches[1] | Out-String
+				git mv $matches[1] $realName
+				Write-Host "Renamed file to" $realName
+			}
+		}
 	}
 }
 
