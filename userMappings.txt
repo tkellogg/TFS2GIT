@@ -1,5 +1,6 @@
 # These are user mappings. The format is
 #
+<<<<<<< HEAD
 # tfs-user=Git User <gituser@example.com>
 #
 # One user per line, no spaces on either side of the equals. Enable this
@@ -8,3 +9,13 @@
 # i.e. .\Tfs2Git.ps1 $/Sherpa -UserFile userMappings.txt
 
 #tkellogg=Tim Kellogg <tkellogg@kpaonline.com>
+=======
+# tfs-user=Git User Name <gituser@example.com>
+#
+# One user per line, no spaces on either side of the equals. Enable this
+# feature by calling Tfs2Git.ps1 with the -UserMappingFile option. 
+#
+# i.e. .\Tfs2Git.ps1 $/Sherpa -UserMappingFile userMappings.txt
+
+BC2SCX46=Wilbert van Dolleweerd <wilbert@arentheym.com>
+>>>>>>> wilbert/master

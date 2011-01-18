@@ -1,5 +1,9 @@
 # Script that copies the history of an entire Team Foundation Server repository to a Git repository.
-# Author: Wilbert van Dolleweerd
+# Original author: Wilbert van Dolleweerd (wilbert@arentheym.com)
+#
+# Contributions from:
+# - Patrick Slagmeulen
+# - Tim Kellogg (timothy.kellogg@gmail.com)
 #
 # Assumptions:
 # - MSysgit is installed and in the PATH 
@@ -11,24 +15,122 @@ Param
 	[string]$TFSRepository,
 	[string]$GitRepository = "ConvertedFromTFS",
 	[string]$WorkspaceName = "TFS2GIT",
-	[string]$UserFile
+	[int]$StartingCommit,
+	[int]$EndingCommit,
+	[string]$UserMappingFile
 )
 
-$userMapping = @{}
+# Do some sanity checks on specific parameters.
+function CheckParameters
+{
+	# If Starting and Ending commit are not used, simply ignore them.
+	if (!$StartingCommit -and !$EndingCommit)
+	{
+		return;
+	}
+
+	if (!$StartingCommit -or !$EndingCommit)
+	{
+		Write-Host "You must supply values for both parameters StartingCommit and EndingCommit"
+		Write-Host "Aborting..."
+		exit
+	}
+
+	if ($EndingCommit -le $StartingCommit)
+	{
+		if ($EndingCommit -eq $StartingCommit)
+		{
+			Write-Host "Parameter StartingCommit" $StartingCommit "cannot have the same value as the parameter EndingCommit" $EndingCommit
+			Write-Host "Aborting..."
+			exit
+		}
+
+		Write-Host "Parameter EndingCommit" $EndingCommit "cannot have a lower value than parameter StartingCommit" $StartingCommit
+		Write-Host "Aborting..."
+		exit
+	}
+}
+
+# When doing a partial import, check if specified commits are actually present in the history
+function AreSpecifiedCommitsPresent([array]$ChangeSets)
+{
+	[bool]$StartingCommitFound = $false
+	[bool]$EndingCommitFound = $false
+	foreach ($ChangeSet in $ChangeSets)
+	{
+		if ($ChangeSet -eq $StartingCommit)
+		{
+			$StartingCommitFound = $true
+		}
+		if ($ChangeSet -eq $EndingCommit)
+		{
+			$EndingCommitFound = $true
+		}
+	}
+
+	if (!$StartingCommitFound -or !$EndingCommitFound)
+	{
+		if (!$StartingCommitFound)
+		{
+			Write-Host "Specified starting commit" $StartingCommit "was not found in the history of" $TFSRepository
+			Write-Host "Please check your starting commit parameter."
+		}
+		if (!$EndingCommitFound)
+		{
+			Write-Host "Specified ending commit" $EndingCommit "was not found in the history of" $TFSRepository
+			Write-Host "Please check your ending commit parameter."			
+		}
+
+		Write-Host "Aborting..."		
+		exit
+	}
+}
+
+# Build an array of changesets that are between the starting and the ending commit.
+function GetSpecifiedRangeFromHistory
+{
+	$ChangeSets = GetAllChangeSetsFromHistory
+
+	# Create an array
+	$FilteredChangeSets = @()
+
+	foreach ($ChangeSet in $ChangeSets)
+	{
+		if (($ChangeSet -ge $StartingCommit) -and ($ChangeSet -le $EndingCommit))
+		{
+			$FilteredChangeSets = $FilteredChangeSets + $ChangeSet
+		}
+	}
+
+	return $FilteredChangeSets
+}
+
 
 function GetTemporaryDirectory
 {
 	return $env:temp + "\workspace"
 }
 
-function prepareUserMapping
+# Creates a hashtable with the user account name as key and the name/email address as value
+function GetUserMapping
 {
-	if ($UserFile -and $(Test-Path $UserFile)) {
-		Get-Content $UserFile | foreach { [regex]::Matches($_, "^([^=#]+)=(.*)$") } | foreach { $userMapping[$_.Groups[1].Value] = $_.Groups[2].Value }
-	}
-	foreach ($key in $userMapping.Keys) {
+	if (!(Test-Path $UserMappingFile))
+	{
+		Write-Host "Could not read user mapping file" $UserMappingFile
+		Write-Host "Aborting..."
+		exit
+	}	
+
+	$UserMapping = @{}
+
+	Write-Host "Reading user mapping file" $UserMappingFile
+	Get-Content $UserMappingFile | foreach { [regex]::Matches($_, "^([^=#]+)=(.*)$") } | foreach { $userMapping[$_.Groups[1].Value] = $_.Groups[2].Value }
+	foreach ($key in $userMapping.Keys) 
+	{
 		Write-Host $key "=>" $userMapping[$key]
 	}
+
+	return $UserMapping
 }
 
 function PrepareWorkspace
@@ -48,15 +150,12 @@ function PrepareWorkspace
 	tf workspace /new /noprompt /comment:"Temporary workspace for converting a TFS repository to Git" $WorkspaceName
 	tf workfold /unmap /workspace:$WorkspaceName $/
 	tf workfold /map /workspace:$WorkspaceName $TFSRepository $TempDir
-
-	# We need this so the .git directory is hidden and will not be removed.
-	git config --global core.hidedotfiles true
 }
 
 
 # Retrieve the history from Team Foundation Server, parse it line by line, 
 # and use a regular expression to retrieve the individual changeset numbers.
-function GetChangesetsFromHistory 
+function GetAllChangesetsFromHistory 
 {
 	$HistoryFileName = "history.txt"
 
@@ -94,19 +193,24 @@ function Convert ([array]$ChangeSets)
 	# Initialize a new git repository.
 	Write-Host "Creating empty Git repository at", $TemporaryDirectory
 	git init $TemporaryDirectory
-	
-	# Make git act like Windows instead of Linux. If we don't do this, we could run into
-	# some serious problems if someone changed case on a directory name
-	pushd $TemporaryDirectory
-	git config core.ignorecase true 
-	popd
+
+	# Let git disregard casesensitivity for this repository (make it act like Windows).
+	# Prevents problems when someones only changes case on a file or directory.
+	git config core.ignorecase true
+
+	# If we use this option, read the usermapping file.
+	if ($UserMappingFile)
+	{
+		$UserMapping = GetUserMapping
+	}
+
+	Write-Host "Retrieving sources from", $TFSRepository, "in", $TemporaryDirectory
 
 	[bool]$RetrieveAll = $true
 	foreach ($ChangeSet in $ChangeSets)
 	{
 		# Retrieve sources from TFS
-		Write-Host "Retrieving sources from", $TFSRepository, "in", $TemporaryDirectory
-		Write-Host "This is changeset", $ChangeSet
+		Write-Host "Retrieving changeset", $ChangeSet
 
 		if ($RetrieveAll)
 		{
@@ -122,20 +226,32 @@ function Convert ([array]$ChangeSets)
 
 
 		# Add sources to Git
-		Write-Host "Adding sources to Git repository"
+		Write-Host "Adding commit to Git repository"
 		pushd $TemporaryDirectory
 		git add . | Out-Null
 		$CommitMessageFileName = "commitmessage.txt"
 		GetCommitMessage $ChangeSet $CommitMessageFileName
-		$commitMsg = Get-Content $CommitMessageFileName
-		
-		$match = ([regex]'User: (\w+)').Match($commitMsg)
-		if ($userMapping.Count -gt 0 -and $match.Success) {
-			$author = $userMapping[$match.Groups[1].Value]
-			Write-Host "Author is" $author
-			git commit --file $CommitMessageFileName --author $author | Out-Null
+
+		# We don't want the commit message to be included, so we remove it from the index.
+		# Not from the working directory, because we need it in the commit command.
+		git rm $CommitMessageFileName --cached --force		
+
+		$CommitMsg = Get-Content $CommitMessageFileName		
+		$Match = ([regex]'User: (\w+)').Match($commitMsg)
+		if ($UserMapping.Count -gt 0 -and $Match.Success -and $UserMapping.ContainsKey($Match.Groups[1].Value)) 
+		{	
+			$Author = $userMapping[$Match.Groups[1].Value]
+			Write-Host "Found user" $Author "in user mapping file."
+			git commit --file $CommitMessageFileName --author $Author | Out-Null									
 		}
-		else {
+		else 
+		{	
+			if ($UserMappingFile)
+			{
+				$GitUserName = git config user.name
+				$GitUserEmail = git config user.email				
+				Write-Host "Could not find user" $Match.Groups[1].Value "in user mapping file. The default configured user" $GitUserName $GitUserEmail "will be used for this commit."
+			}
 			git commit --file $CommitMessageFileName | Out-Null
 		}
 		popd 
@@ -168,7 +284,7 @@ function CleanUp
 {
 	$TempDir = GetTemporaryDirectory
 
-	Write-Host "Removing workspace"
+	Write-Host "Removing workspace from TFS"
 	tf workspace /delete $WorkspaceName /noprompt
 
 	Write-Host "Removing working directories in" $TempDir
@@ -178,11 +294,23 @@ function CleanUp
 	Remove-Item "history.txt"
 }
 
+# This is where all the fun starts...
 function Main
 {
-	prepareUserMapping
+	CheckParameters
 	PrepareWorkspace
-	Convert(GetChangesetsFromHistory)
+
+	if ($StartingCommit -and $EndingCommit)
+	{
+		Write-Host "Filtering history..."
+		AreSpecifiedCommitsPresent(GetAllChangeSetsFromHistory)
+		Convert(GetSpecifiedRangeFromHistory)
+	}
+	else
+	{
+		Convert(GetAllChangeSetsFromHistory)
+	}
+
 	CloneToLocalBareRepository
 	CleanUp
 
